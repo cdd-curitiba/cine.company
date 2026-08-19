@@ -363,10 +363,40 @@ async function grab(u,type){
   return type==='json' ? r.json() : r.text();
 }
 
+/* ---------- cache local da lista (IndexedDB) ---------- */
+function db(){
+  return new Promise((ok,err)=>{
+    const r=indexedDB.open('cinecompany',1);
+    r.onupgradeneeded=()=>r.result.createObjectStore('listas');
+    r.onsuccess=()=>ok(r.result); r.onerror=()=>err(r.error);
+  });
+}
+async function cacheSalvar(id,dados){
+  try{
+    const d=await db();
+    await new Promise((ok,err)=>{
+      const t=d.transaction('listas','readwrite');
+      t.objectStore('listas').put(dados,id);
+      t.oncomplete=ok; t.onerror=()=>err(t.error);
+    });
+  }catch(e){}
+}
+async function cacheLer(id){
+  try{
+    const d=await db();
+    return await new Promise((ok)=>{
+      const r=d.transaction('listas','readonly').objectStore('listas').get(id);
+      r.onsuccess=()=>ok(r.result||null); r.onerror=()=>ok(null);
+    });
+  }catch(e){ return null }
+}
+const CACHE_HORAS = 12;
+
 /* baixa texto grande mostrando progresso e permitindo cancelar */
-async function grabTexto(u, limite=120000){
+async function grabTexto(u, ocioso=60000){
   S.abort = new AbortController();
-  const relogio = setTimeout(()=>S.abort.abort('tempo'), limite);
+  let relogio = setTimeout(()=>S.abort.abort('tempo'), ocioso);
+  const renova = ()=>{ clearTimeout(relogio); relogio=setTimeout(()=>S.abort.abort('tempo'), ocioso) };
   try{
     const r = await fetch(px(u), {cache:'no-store', signal:S.abort.signal});
     if(r.status===401){ sessaoCaiu(); throw new Error('Sessão expirada') }
@@ -377,6 +407,7 @@ async function grabTexto(u, limite=120000){
     for(;;){
       const {done, value} = await leitor.read();
       if(done) break;
+      renova();
       bytes += value.length;
       txt += dec.decode(value, {stream:true});
       if(bytes - marca > 262144){
@@ -489,12 +520,26 @@ function dropList(id){
 /* =========================================================
    CARREGAMENTO
    ========================================================= */
-async function openList(cfg){
+async function openList(cfg, forcar){
   if(!cfg) return;
   S.act=cfg; save('cc_last',cfg.id);
   busy(true,'Carregando '+cfg.name+'...','Listas grandes podem levar até um minuto. Não feche a página.');
+
+  if(!forcar){
+    const c=await cacheLer(cfg.id);
+    if(c && (Date.now()-c.ts) < CACHE_HORAS*3600000){
+      S.live=c.live; S.vod=c.vod; S.series=c.series; S.cats=c.cats;
+      busy(false);
+      $('splash').style.display='none';
+      $('app').classList.add('show');
+      go('live');
+      return;
+    }
+  }
+
   try{
     if(cfg.type==='xtream') await loadXtream(cfg); else await loadM3U(cfg);
+    cacheSalvar(cfg.id,{ts:Date.now(), live:S.live, vod:S.vod, series:S.series, cats:S.cats});
     busy(false);
     $('splash').style.display='none';
     $('app').classList.add('show');
@@ -1013,9 +1058,12 @@ function logout(){
 }
 async function reloadList(){
   if(!S.act) return;
-  busy(true,'Atualizando lista...','Renovando os endereços junto ao provedor.');
-  try{ S.act.type==='xtream'?await loadXtream(S.act):await loadM3U(S.act); busy(false); render(); toast('Lista atualizada') }
-  catch(e){ busy(false); toast('Falha ao atualizar: '+diagnose(e).slice(0,90)) }
+  busy(true,'Atualizando lista...','Baixando tudo de novo do provedor.');
+  try{
+    S.act.type==='xtream'?await loadXtream(S.act):await loadM3U(S.act);
+    cacheSalvar(S.act.id,{ts:Date.now(), live:S.live, vod:S.vod, series:S.series, cats:S.cats});
+    busy(false); render(); toast('Lista atualizada');
+  }catch(e){ busy(false); toast('Falha ao atualizar: '+diagnose(e).slice(0,90)) }
 }
 
 function openHelp(){
