@@ -1049,7 +1049,12 @@ function tryPlay(i){
       v.src=url; v.oncanplay=ok; v.onerror=()=>{ note(i,'HLS nativo recusado'); tryPlay(i+1) }; return;
     }
     if(!(window.Hls&&Hls.isSupported())){ note(i,'hls.js indisponível'); return tryPlay(i+1) }
-    S.hls=new Hls({maxBufferLength:24,manifestLoadingTimeOut:15000,fragLoadingTimeOut:20000,manifestLoadingMaxRetry:1});
+    S.hls=new Hls({
+      maxBufferLength:40, maxMaxBufferLength:90, backBufferLength:30,
+      liveSyncDurationCount:4, liveMaxLatencyDurationCount:12,
+      manifestLoadingTimeOut:15000, fragLoadingTimeOut:25000,
+      manifestLoadingMaxRetry:1, fragLoadingMaxRetry:4
+    });
     S.hls.loadSource(url); S.hls.attachMedia(v);
     S.hls.on(Hls.Events.MANIFEST_PARSED,ok);
     S.hls.on(Hls.Events.ERROR,(_,d)=>{
@@ -1064,7 +1069,18 @@ function tryPlay(i){
   if(engine==='ts'){
     if(!(window.mpegts && mpegts.getFeatureList().mseLivePlayback)){ note(i,'MSE indisponível neste navegador'); return tryPlay(i+1) }
     try{
-      S.ts=mpegts.createPlayer({type:'mpegts',isLive:live,url},{enableStashBuffer:false,liveBufferLatencyChasing:true,lazyLoad:false});
+      const iOS=/iPad|iPhone|iPod/.test(navigator.userAgent);
+      S.ts=mpegts.createPlayer({type:'mpegts',isLive:live,url},{
+        enableWorker:true,
+        enableWorkerForMSE:!iOS,
+        enableStashBuffer:true,
+        stashInitialSize:1024*512,
+        liveBufferLatencyChasing:false,
+        lazyLoad:false,
+        autoCleanupSourceBuffer:true,
+        autoCleanupMaxBackwardDuration:40,
+        autoCleanupMinBackwardDuration:20
+      });
       S.ts.attachMediaElement(v);
       S.ts.on(mpegts.Events.ERROR,(t,d,info)=>{ if(tk!==S.token) return; note(i,'TS '+t+' '+(d||'')+(info&&info.code?' ('+info.code+')':'')); tryPlay(i+1) });
       S.ts.on(mpegts.Events.MEDIA_INFO,ok);
