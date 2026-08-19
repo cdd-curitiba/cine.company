@@ -204,6 +204,38 @@ input:focus{border-color:var(--cyan);outline:none}
 .stepper button{width:32px;height:32px;border-radius:8px;background:var(--surface2);font-weight:700}
 .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);background:var(--surface2);border:1px solid var(--line);color:var(--text);padding:12px 18px;border-radius:11px;font-size:.85rem;z-index:99;opacity:0;pointer-events:none;transition:.25s;max-width:90vw;text-align:center}
 .toast.show{opacity:1}
+/* ---------- CELULAR ---------- */
+@media(max-width:860px){
+  .main{flex-direction:column;overflow:hidden}
+
+  /* video no topo, so quando ha algo tocando */
+  .stage{order:1;flex:0 0 auto;display:none}
+  #app.tocando .stage{display:flex}
+  .stage .epg{display:none}
+  .videowrap{position:sticky;top:0;z-index:3}
+  .nowbar{padding:10px 14px;display:flex;align-items:center;gap:10px}
+  .nowbar h3{font-size:.9rem}
+  .nowbar .meta{font-size:.7rem}
+
+  /* categorias viram fita horizontal */
+  .cats{order:2;width:100%;flex:0 0 auto;display:flex;flex-direction:row;gap:8px;
+    overflow-x:auto;overflow-y:hidden;border-right:none;border-bottom:1px solid var(--line);
+    padding:10px 12px;scrollbar-width:none}
+  .cats::-webkit-scrollbar{display:none}
+  .cat{width:auto;flex:0 0 auto;white-space:nowrap;background:var(--surface);
+    border:1px solid var(--line);border-radius:20px;padding:9px 15px;font-size:.8rem}
+  .cat.on{background:var(--cyan);border-color:var(--cyan);color:#04121A}
+  .cat .ct{margin-left:6px;opacity:.65}
+
+  /* lista ocupa o resto */
+  .pane{order:3;flex:1;min-height:0;width:100%}
+  .chlist{padding:6px}
+  .row{padding:10px 8px}
+  .row img{width:44px;height:44px}
+  .row .num{min-width:30px}
+  .grid{padding:12px}
+}
+
 body.tvmode{--ui:1.25}
 body.tvmode .row.kfoc,body.tvmode .cat.kfoc,body.tvmode .poster.kfoc{outline:3px solid var(--cyan);outline-offset:2px;border-radius:11px}
 .fs .videowrap{aspect-ratio:auto;height:100%}
@@ -767,6 +799,7 @@ function buildCats(){
    ========================================================= */
 async function go(tab){
   closeOverlay();
+  if(!S.cur) $('app').classList.remove('tocando');
   if((tab==='vod'||tab==='series') && S.act && S.act.type==='xtream'){
     const ok=await carregarSecao(tab);
     if(!ok) return;
@@ -941,6 +974,7 @@ function closeOverlay(){
   const ov=$('ovStage'); if(!ov) return;
   killEngines();
   ov.remove(); S.cur=null;
+  $('app').classList.remove('tocando');
 }
 
 function killEngines(){
@@ -960,6 +994,7 @@ function altTs(u){
 
 function play(item){
   S.cur=item;
+  $('app').classList.add('tocando');
   if(S.ses && S.ses.exp && S.ses.exp - Date.now() < 3*3600000) renovarSessao();
   ensureStage();
   document.querySelectorAll('.row').forEach(r=>r.classList.toggle('on', r.dataset.id===item.id));
