@@ -356,11 +356,19 @@ function px(u){
   const base=(S.cfg.proxy||API).replace(/\/$/,'');
   return base+'/?t='+encodeURIComponent(S.ses?S.ses.token:'')+'&url='+encodeURIComponent(u);
 }
-async function grab(u,type){
-  const r = await fetch(px(u), {cache:'no-store'});
-  if(r.status===401){ sessaoCaiu(); throw new Error('Sessão expirada') }
-  if(!r.ok) throw new Error('HTTP '+r.status);
-  return type==='json' ? r.json() : r.text();
+async function grab(u,type,limite=45000){
+  const ctrl=new AbortController();
+  S.abort=ctrl;
+  const relogio=setTimeout(()=>ctrl.abort('tempo'), limite);
+  try{
+    let r = await fetch(px(u), {cache:'no-store', signal:ctrl.signal});
+    if(r.status===401 && await renovarSessao()){
+      r = await fetch(px(u), {cache:'no-store', signal:ctrl.signal});
+    }
+    if(r.status===401){ sessaoCaiu(); throw new Error('Sessão expirada') }
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return type==='json' ? r.json() : r.text();
+  }finally{ clearTimeout(relogio); if(S.abort===ctrl) S.abort=null }
 }
 
 /* ---------- cache local da lista (IndexedDB) ---------- */
@@ -373,13 +381,18 @@ function db(){
 }
 async function cacheSalvar(id,dados){
   try{
+    if(navigator.storage&&navigator.storage.persist) navigator.storage.persist().catch(()=>{});
     const d=await db();
     await new Promise((ok,err)=>{
       const t=d.transaction('listas','readwrite');
       t.objectStore('listas').put(dados,id);
-      t.oncomplete=ok; t.onerror=()=>err(t.error);
+      t.oncomplete=ok; t.onerror=()=>err(t.error); t.onabort=()=>err(t.error||new Error('abortado'));
     });
-  }catch(e){}
+    console.log('[Cine] lista guardada no cache:', id);
+  }catch(e){
+    console.error('[Cine] falha ao guardar cache:', e);
+    toast('Não consegui guardar a lista neste aparelho. Ela vai baixar de novo na próxima vez.');
+  }
 }
 async function cacheLer(id){
   try{
@@ -398,7 +411,10 @@ async function grabTexto(u, ocioso=60000){
   let relogio = setTimeout(()=>S.abort.abort('tempo'), ocioso);
   const renova = ()=>{ clearTimeout(relogio); relogio=setTimeout(()=>S.abort.abort('tempo'), ocioso) };
   try{
-    const r = await fetch(px(u), {cache:'no-store', signal:S.abort.signal});
+    let r = await fetch(px(u), {cache:'no-store', signal:S.abort.signal});
+    if(r.status===401 && await renovarSessao()){
+      r = await fetch(px(u), {cache:'no-store', signal:S.abort.signal});
+    }
     if(r.status===401){ sessaoCaiu(); throw new Error('Sessão expirada') }
     if(!r.ok) throw new Error('HTTP '+r.status);
     if(!r.body) return await r.text();
@@ -409,6 +425,7 @@ async function grabTexto(u, ocioso=60000){
       if(done) break;
       renova();
       bytes += value.length;
+      S.ultBytes = bytes;
       txt += dec.decode(value, {stream:true});
       if(bytes - marca > 262144){
         marca = bytes;
@@ -416,6 +433,7 @@ async function grabTexto(u, ocioso=60000){
       }
     }
     txt += dec.decode();
+    if(bytes < 1024) throw new Error('servidor devolveu resposta vazia');
     return txt;
   }finally{ clearTimeout(relogio); S.abort=null; const el=$('loadProg'); if(el) el.textContent='' }
 }
@@ -444,7 +462,7 @@ async function entrar(){
       body:JSON.stringify({usuario,senha,dispositivo:idAparelho()})});
     const d=await r.json();
     if(!r.ok) throw new Error(d.erro||'Não foi possível entrar');
-    S.ses={token:d.token, nome:d.nome, vence:d.vence, usuario};
+    S.ses={token:d.token, renova:d.renova, nome:d.nome, vence:d.vence, usuario, exp:expDe(d.token)};
     save(K_SES,S.ses);
     abrirPlayer();
   }catch(err){
@@ -453,19 +471,55 @@ async function entrar(){
   }finally{ b.textContent='Entrar' }
 }
 function abrirPlayer(){
+  vigiarSessao();
+  if(S.ses && !S.ses.exp) S.ses.exp=expDe(S.ses.token);
   $('gate').style.display='none';
   $('splash').style.display='flex';
   drawSaved();
   const last=load('cc_last',null), c=S.lists.find(x=>x.id===last);
   if(c) openList(c);
 }
+function expDe(tk){
+  try{ return JSON.parse(atob(tk.split('.')[0].replace(/-/g,'+').replace(/_/g,'/'))).exp*1000 }
+  catch(e){ return 0 }
+}
+/* renova o acesso em segundo plano, sem interromper o cliente */
+async function renovarSessao(){
+  if(!S.ses || !S.ses.renova) return false;
+  if(S.renovando) return S.renovando;
+  S.renovando = (async()=>{
+    try{
+      const r=await fetch(API+'/api/refresh',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({renova:S.ses.renova, dispositivo:idAparelho()})});
+      const d=await r.json();
+      if(!r.ok) throw new Error(d.erro||'falhou');
+      S.ses.token=d.token; S.ses.vence=d.vence; S.ses.exp=expDe(d.token);
+      save(K_SES,S.ses);
+      console.log('[Cine] sessão renovada');
+      return true;
+    }catch(e){
+      console.warn('[Cine] não foi possível renovar:', e.message);
+      S.motivoQueda = e.message;
+      return false;
+    }finally{ S.renovando=null }
+  })();
+  return S.renovando;
+}
+function vigiarSessao(){
+  clearInterval(S.vigia);
+  S.vigia=setInterval(()=>{
+    if(!S.ses||!S.ses.exp) return;
+    if(S.ses.exp - Date.now() < 3*3600000) renovarSessao();
+  }, 15*60000);
+}
+
 function sessaoCaiu(){
   S.ses=null; localStorage.removeItem(K_SES);
   killEngines();
   $('app').classList.remove('show');
   $('splash').style.display='none';
   $('gate').style.display='flex';
-  const e=$('gErr'); e.textContent='Sua sessão expirou. Entre novamente.'; e.classList.add('show');
+  const e=$('gErr'); e.textContent=S.motivoQueda||'Sua sessão expirou. Entre novamente.'; e.classList.add('show');
 }
 function sairConta(){
   localStorage.removeItem(K_SES); localStorage.removeItem('cc_last');
@@ -527,8 +581,9 @@ async function openList(cfg, forcar){
 
   if(!forcar){
     const c=await cacheLer(cfg.id);
+    console.log('[Cine] cache:', c ? Math.round((Date.now()-c.ts)/60000)+' min de idade' : 'vazio');
     if(c && (Date.now()-c.ts) < CACHE_HORAS*3600000){
-      S.live=c.live; S.vod=c.vod; S.series=c.series; S.cats=c.cats;
+      S.live=c.live; S.vod=c.vod; S.series=c.series; S.cats=c.cats; S.pronto=c.pronto||{live:true,vod:true,series:true};
       busy(false);
       $('splash').style.display='none';
       $('app').classList.add('show');
@@ -539,7 +594,7 @@ async function openList(cfg, forcar){
 
   try{
     if(cfg.type==='xtream') await loadXtream(cfg); else await loadM3U(cfg);
-    cacheSalvar(cfg.id,{ts:Date.now(), live:S.live, vod:S.vod, series:S.series, cats:S.cats});
+    cacheSalvar(cfg.id,{ts:Date.now(), live:S.live, vod:S.vod, series:S.series, cats:S.cats, pronto:S.pronto});
     busy(false);
     $('splash').style.display='none';
     $('app').classList.add('show');
@@ -551,14 +606,17 @@ async function openList(cfg, forcar){
   }
 }
 function diagnose(e){
-  const m=String(e&&e.message||e);
-  if(/abort|tempo|cancel/i.test(m))
-    return 'A lista demorou demais para responder e o carregamento foi interrompido. Tente novamente ou confirme a URL com o provedor.';
+  const m=String((e&&(e.message||e.name))||e)+(e&&e.cause?' / '+e.cause:'');
+  console.error('[Cine] falha ao carregar:', e);
+  window.__ultimoErro = m;
+  const mb = S.ultBytes ? ' Chegaram '+(S.ultBytes/1048576).toFixed(1)+' MB antes de parar.' : '';
+  if(/abort|tempo/i.test(m))
+    return 'A conexão com o provedor foi interrompida.'+mb+' Detalhe técnico: '+m;
   if(/Failed to fetch|NetworkError|Load failed/i.test(m))
     return 'Não foi possível acessar o servidor. Isso quase sempre é bloqueio de CORS do provedor: configure a URL do proxy em Ajustes, ou confirme se o servidor está no ar.';
   if(/401|403/.test(m)) return 'Usuário ou senha recusados pelo provedor.';
   if(/404/.test(m)) return 'O servidor respondeu 404. Copie a URL inteira que o provedor mandou, com usuário, senha, a porta (ex.: :80 ou :8080) e o final &type=m3u_plus&output=ts.';
-  return 'Falha ao carregar a lista: '+m;
+  return 'Falha ao carregar a lista. Detalhe técnico: '+m;
 }
 
 /* ---------- XTREAM ---------- */
@@ -575,32 +633,63 @@ async function loadXtream(c){
   c.maxCons = info.user_info.max_connections;
   c.activeCons = info.user_info.active_cons;
 
-  const [lc,ls,vc,vs,sc,ss] = await Promise.all([
+  const [lc,ls] = await Promise.all([
     grab(xtUrl(c,'get_live_categories'),'json').catch(()=>[]),
-    grab(xtUrl(c,'get_live_streams'),'json').catch(()=>[]),
-    grab(xtUrl(c,'get_vod_categories'),'json').catch(()=>[]),
-    grab(xtUrl(c,'get_vod_streams'),'json').catch(()=>[]),
-    grab(xtUrl(c,'get_series_categories'),'json').catch(()=>[]),
-    grab(xtUrl(c,'get_series'),'json').catch(()=>[])
+    grab(xtUrl(c,'get_live_streams'),'json').catch(()=>[])
   ]);
   const cmap = a => Object.fromEntries((a||[]).map(x=>[x.category_id, x.category_name]));
-  const lm=cmap(lc), vm=cmap(vc), sm=cmap(sc);
+  const lm=cmap(lc);
 
   S.live = (ls||[]).map(x=>({
     id:'l'+x.stream_id, sid:x.stream_id, name:x.name, logo:x.stream_icon,
     num:x.num, cat:lm[x.category_id]||'Sem categoria', epgId:x.epg_channel_id,
     url:`${c.host}/live/${c.user}/${c.pass}/${x.stream_id}.m3u8`
   }));
-  S.vod = (vs||[]).map(x=>({
-    id:'v'+x.stream_id, name:x.name, logo:x.stream_icon||x.cover,
-    cat:vm[x.category_id]||'Sem categoria', rating:x.rating, year:x.year,
-    url:`${c.host}/movie/${c.user}/${c.pass}/${x.stream_id}.${x.container_extension||'mp4'}`
-  }));
-  S.series = (ss||[]).map(x=>({
-    id:'s'+x.series_id, sid:x.series_id, name:x.name, logo:x.cover,
-    cat:sm[x.category_id]||'Sem categoria', plot:x.plot, seasons:null
-  }));
+  S.vod=[]; S.series=[]; S.pronto={live:true, vod:false, series:false};
   buildCats();
+}
+
+/* filmes e series entram so quando a aba e aberta */
+async function carregarSecao(qual){
+  const c=S.act;
+  if(!c || c.type!=='xtream') return true;
+  S.pronto = S.pronto || {live:true, vod:false, series:false};
+  if(S.pronto[qual]) return true;
+
+  busy(true, qual==='vod'?'Carregando filmes...':'Carregando séries...','Isso acontece só na primeira vez.');
+  try{
+    const cmap = a => Object.fromEntries((a||[]).map(x=>[x.category_id, x.category_name]));
+    if(qual==='vod'){
+      const [vc,vs]=await Promise.all([
+        grab(xtUrl(c,'get_vod_categories'),'json').catch(()=>[]),
+        grab(xtUrl(c,'get_vod_streams'),'json').catch(()=>[])
+      ]);
+      const vm=cmap(vc);
+      S.vod=(vs||[]).map(x=>({
+        id:'v'+x.stream_id, name:x.name, logo:x.stream_icon||x.cover,
+        cat:vm[x.category_id]||'Sem categoria', rating:x.rating, year:x.year,
+        url:`${c.host}/movie/${c.user}/${c.pass}/${x.stream_id}.${x.container_extension||'mp4'}`
+      }));
+    }else{
+      const [sc,ss]=await Promise.all([
+        grab(xtUrl(c,'get_series_categories'),'json').catch(()=>[]),
+        grab(xtUrl(c,'get_series'),'json').catch(()=>[])
+      ]);
+      const sm=cmap(sc);
+      S.series=(ss||[]).map(x=>({
+        id:'s'+x.series_id, sid:x.series_id, name:x.name, logo:x.cover,
+        cat:sm[x.category_id]||'Sem categoria', plot:x.plot, seasons:null
+      }));
+    }
+    S.pronto[qual]=true;
+    buildCats();
+    cacheSalvar(c.id,{ts:Date.now(), live:S.live, vod:S.vod, series:S.series, cats:S.cats, pronto:S.pronto});
+    busy(false);
+    return true;
+  }catch(e){
+    busy(false); toast('Não foi possível carregar: '+diagnose(e).slice(0,70));
+    return false;
+  }
 }
 async function seriesInfo(item){
   if(item.seasons) return item.seasons;
@@ -660,6 +749,7 @@ async function loadM3U(c){
   });
   Object.values(byShow).forEach(s=>Object.values(s.seasons).forEach(a=>a.sort((x,y)=>x.ep-y.ep)));
   S.live=live; S.vod=vod; S.series=Object.values(byShow);
+  S.pronto={live:true, vod:true, series:true};
   buildCats();
 }
 
@@ -675,8 +765,12 @@ function buildCats(){
 /* =========================================================
    NAVEGAÇÃO
    ========================================================= */
-function go(tab){
+async function go(tab){
   closeOverlay();
+  if((tab==='vod'||tab==='series') && S.act && S.act.type==='xtream'){
+    const ok=await carregarSecao(tab);
+    if(!ok) return;
+  }
   S.tab=tab; S.cat='all'; S.page=0;
   document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('on', b.dataset.tab===tab));
   render();
@@ -866,6 +960,7 @@ function altTs(u){
 
 function play(item){
   S.cur=item;
+  if(S.ses && S.ses.exp && S.ses.exp - Date.now() < 3*3600000) renovarSessao();
   ensureStage();
   document.querySelectorAll('.row').forEach(r=>r.classList.toggle('on', r.dataset.id===item.id));
   if($('nowName')){ $('nowName').textContent=item.name; $('nowMeta').textContent=item.cat||'' }
@@ -895,7 +990,9 @@ function play(item){
   S.cands=c; S.errs=[]; S.token=(S.token||0)+1;
   tryPlay(0);
   if(live && S.act.type==='xtream' && item.sid) loadEpg(item);
-  else if($('epgBox')) $('epgBox').innerHTML='<div class="empty">Programação disponível apenas em canais ao vivo.</div>';
+  else if($('epgBox')) $('epgBox').innerHTML='<div class="empty">'+
+    (live?'Esta lista não fornece guia de programação. Cadastre pela aba Xtream Codes para ter o guia.'
+        :'Programação disponível apenas em canais ao vivo.')+'</div>';
 }
 
 function tryPlay(i){
@@ -908,7 +1005,9 @@ function tryPlay(i){
   const [engine,raw]=c;
   const url=px(raw);
   const live=S.cur.id[0]==='l';
-  vstate('<div class="spin"></div><p>Carregando transmissão...</p>');
+  const nomes={hls:'HLS', ts:'MPEG-TS', native:'reprodução direta'};
+  vstate('<div class="spin"></div><p>Conectando por '+nomes[engine]+
+    (i>0?' (tentativa '+(i+1)+' de '+S.cands.length+')':'')+'...</p>');
 
   if(engine==='hls'){
     if(v.canPlayType('application/vnd.apple.mpegurl') && !(window.Hls&&Hls.isSupported())){
@@ -1061,7 +1160,7 @@ async function reloadList(){
   busy(true,'Atualizando lista...','Baixando tudo de novo do provedor.');
   try{
     S.act.type==='xtream'?await loadXtream(S.act):await loadM3U(S.act);
-    cacheSalvar(S.act.id,{ts:Date.now(), live:S.live, vod:S.vod, series:S.series, cats:S.cats});
+    cacheSalvar(S.act.id,{ts:Date.now(), live:S.live, vod:S.vod, series:S.series, cats:S.cats, pronto:S.pronto});
     busy(false); render(); toast('Lista atualizada');
   }catch(e){ busy(false); toast('Falha ao atualizar: '+diagnose(e).slice(0,90)) }
 }
