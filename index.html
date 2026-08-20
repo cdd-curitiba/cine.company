@@ -637,44 +637,90 @@ const RX_SER = [/^(.*?)[\s\-_.]*[SsTt](\d{1,2})[\s\-_.]*[EeXx](\d{1,3})/, /^(.*?
 function attr(line,k){const m=line.match(new RegExp(k+'="([^"]*)"','i'));return m?m[1]:''}
 
 async function loadM3U(c){
-  const txt = await grabTexto(c.url);
-  if(!/#EXTM3U/i.test(txt.slice(0,600))) throw new Error('O arquivo retornado não é uma lista M3U válida.');
-  const lines = txt.split(/\r?\n/);
   const live=[], vod=[], serEp=[];
-  let cur=null, n=0;
-  for(let i=0;i<lines.length;i++){
-    const L=lines[i].trim();
-    if(!L) continue;
+  let cur=null, n=0, sobra='', primeira=true, itens=0;
+
+  S.abort = new AbortController();
+  let relogio = setTimeout(()=>S.abort.abort('tempo'), 60000);
+  const renova = ()=>{ clearTimeout(relogio); relogio=setTimeout(()=>S.abort.abort('tempo'), 60000) };
+
+  function linha(L){
+    L=L.trim();
+    if(!L) return;
+    if(primeira){
+      primeira=false;
+      if(!/^#EXTM3U/i.test(L)) throw new Error('O endereço não devolveu uma lista M3U válida.');
+      return;
+    }
     if(/^#EXTINF/i.test(L)){
       cur={ name:(L.split(',').slice(1).join(',')||'Sem nome').trim(),
             logo:attr(L,'tvg-logo'), cat:attr(L,'group-title')||'Sem categoria',
             epgId:attr(L,'tvg-id'), num:++n };
-    }else if(L[0]!=='#' && cur){
-      cur.url=L;
-      const g=cur.cat.toLowerCase(), u=L.toLowerCase();
-      const isVodExt=/\.(mp4|mkv|avi|mov|m4v)(\?|$)/.test(u);
-      let type='live';
-      if(u.includes('/series/')||/serie|season|temporada/.test(g)) type='series';
-      else if(u.includes('/movie/')||/filme|movie|vod|cinema/.test(g)||isVodExt) type='vod';
-      let m=null;
-      for(const rx of RX_SER){ m=cur.name.match(rx); if(m) break }
-      if(type==='series'||(m&&type!=='live')){
-        if(m){ serEp.push({show:m[1].replace(/[\-_.]+$/,'').trim(), season:+m[2], ep:+m[3], ...cur}) }
-        else { vod.push({id:'v'+i,...cur}) }
-      }else if(type==='vod'){ vod.push({id:'v'+i,...cur}) }
-      else { live.push({id:'l'+i,...cur}) }
-      cur=null;
+      return;
     }
+    if(L[0]==='#' || !cur) return;
+
+    cur.url=L;
+    const g=cur.cat.toLowerCase(), u=L.toLowerCase();
+    const isVodExt=/\.(mp4|mkv|avi|mov|m4v)(\?|$)/.test(u);
+    let tipo='live';
+    if(u.includes('/series/')||/serie|season|temporada/.test(g)) tipo='series';
+    else if(u.includes('/movie/')||/filme|movie|vod|cinema/.test(g)||isVodExt) tipo='vod';
+
+    let m=null;
+    if(tipo!=='live'){ for(const rx of RX_SER){ m=cur.name.match(rx); if(m) break } }
+
+    if(tipo==='series' && m){
+      serEp.push({show:m[1].replace(/[\-_.]+$/,'').trim(), season:+m[2], ep:+m[3], ...cur});
+    }else if(tipo==='series' || tipo==='vod'){
+      vod.push({id:'v'+(itens), ...cur});
+    }else{
+      live.push({id:'l'+(itens), ...cur});
+    }
+    itens++;
+    cur=null;
   }
+
+  try{
+    const r = await fetch(px(c.url), {cache:'no-store', signal:S.abort.signal});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    if(!r.body) throw new Error('resposta sem conteúdo');
+
+    const leitor=r.body.getReader(), dec=new TextDecoder('utf-8');
+    let bytes=0, marca=0;
+    for(;;){
+      const {done, value} = await leitor.read();
+      if(done) break;
+      renova();
+      bytes += value.length; S.ultBytes = bytes;
+      const pedaco = sobra + dec.decode(value, {stream:true});
+      const linhas = pedaco.split('\n');
+      sobra = linhas.pop();
+      for(let i=0;i<linhas.length;i++) linha(linhas[i]);
+      if(bytes - marca > 524288){
+        marca = bytes;
+        const el=$('loadProg');
+        if(el) el.textContent = (bytes/1048576).toFixed(1)+' MB · '+itens.toLocaleString('pt-BR')+' itens';
+        await new Promise(r2=>setTimeout(r2,0)); // devolve o controle para a tela respirar
+      }
+    }
+    if(sobra) linha(sobra);
+    if(!itens) throw new Error('a lista veio vazia');
+  }finally{
+    clearTimeout(relogio); S.abort=null;
+    const el=$('loadProg'); if(el) el.textContent='';
+  }
+
   const byShow={};
   serEp.forEach(e=>{
     const key=e.show.toLowerCase();
     if(!byShow[key]) byShow[key]={id:'s'+key, name:e.show, logo:e.logo, cat:e.cat, seasons:{}};
-    const s=byShow[key];
-    if(!s.seasons[e.season]) s.seasons[e.season]=[];
-    s.seasons[e.season].push({ep:e.ep,name:e.name,url:e.url});
+    const sr=byShow[key];
+    if(!sr.seasons[e.season]) sr.seasons[e.season]=[];
+    sr.seasons[e.season].push({ep:e.ep,name:e.name,url:e.url});
   });
-  Object.values(byShow).forEach(s=>Object.values(s.seasons).forEach(a=>a.sort((x,y)=>x.ep-y.ep)));
+  Object.values(byShow).forEach(x=>Object.values(x.seasons).forEach(a=>a.sort((p,q)=>p.ep-q.ep)));
+
   S.live=live; S.vod=vod; S.series=Object.values(byShow);
   S.pronto={live:true, vod:true, series:true};
   buildCats();
@@ -774,6 +820,10 @@ function addSentinel(box,cb){
   S.io=new IntersectionObserver(en=>{ if(en[0].isIntersecting){ S.io.disconnect(); s.remove(); cb() } },{root:box,rootMargin:'400px'});
   S.io.observe(s);
 }
+function marcarToque(){ S.tocou=true }
+['pointerdown','keydown','touchstart'].forEach(ev=>
+  document.addEventListener(ev, marcarToque, {once:false, passive:true}));
+
 function pickRow(id){
   const it=[...S.live,...S.vod,...S.series,...favList()].find(x=>x.id===id);
   if(!it) return;
@@ -977,9 +1027,9 @@ function tryPlay(i){
       });
       S.ts.attachMediaElement(v);
       S.ts.on(mpegts.Events.ERROR,(t,d,info)=>{ if(tk!==S.token) return; note(i,'TS '+t+' '+(d||'')+(info&&info.code?' ('+info.code+')':'')); tryPlay(i+1) });
-      S.ts.on(mpegts.Events.MEDIA_INFO,ok);
+      S.ts.on(mpegts.Events.MEDIA_INFO,()=>iniciar(v));
       S.ts.load();
-      try{ const r=S.ts.play(); if(r&&r.catch) r.catch(()=>askSound()) }catch(e){ askSound() }
+      try{ S.ts.play() }catch(e){}
       setTimeout(()=>{ if(tk!==S.token) return; if(v.readyState<2 && S.ts){ note(i,'TS sem dados em 14s'); tryPlay(i+1) } }, 14000);
     }catch(e){ note(i,'TS exceção: '+e.message); tryPlay(i+1) }
     return;
@@ -989,7 +1039,7 @@ function tryPlay(i){
   v.oncanplay=ok;
   v.onerror=()=>{ note(i,'Nativo: formato recusado pelo navegador'); tryPlay(i+1) };
 
-  function ok(){ vstate(''); const r=v.play(); if(r&&r.catch) r.catch(()=>askSound()) }
+  function ok(){ iniciar(v) }
 }
 
 async function checkCons(){
@@ -1026,10 +1076,25 @@ function giveUp(){
     +'<button class="btn ghost" style="max-width:200px" onclick="this.nextElementSibling.style.display=\'block\';this.style.display=\'none\'">Ver detalhes técnicos</button>'
     +'<div style="display:none;max-width:520px;max-height:180px;overflow:auto">'+diagHTML()+'</div>');
 }
-function askSound(){
-  const v=$('video'); v.muted=true; v.play().catch(()=>{});
-  vstate('<button class="btn" style="max-width:220px" onclick="$(\'video\').muted=false;$(\'video\').play();vstate(\'\')">Toque para ouvir</button>');
+/* tenta com som; se o navegador recusar, toca mudo e oferece o botão */
+function iniciar(v){
+  v.muted=false;
+  const p=v.play();
+  if(!p||!p.catch){ vstate(''); return }
+  p.then(()=>vstate('')).catch(()=>{
+    v.muted=true;
+    v.play().then(()=>{
+      vstate('<button class="btn" style="max-width:230px" onclick="ligarSom()">🔇 Toque para ouvir</button>');
+    }).catch(()=>{
+      vstate('<button class="btn" style="max-width:230px" onclick="ligarSom()">▶ Toque para assistir</button>');
+    });
+  });
 }
+function ligarSom(){
+  const v=$('video'); if(!v) return;
+  v.muted=false; v.play().catch(()=>{}); vstate('');
+}
+function askSound(){ iniciar($('video')) }
 function toggleFS(){
   const el=$('stage');
   if(!document.fullscreenElement) (el.requestFullscreen?el.requestFullscreen():$('video').webkitEnterFullscreen&&$('video').webkitEnterFullscreen());
