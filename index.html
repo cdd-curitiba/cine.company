@@ -966,7 +966,7 @@ function play(item){
     const h=altHls(u); if(h) c.push(['hls',h]);
     c.push(['native',u]);
   }
-  S.cands=c; S.errs=[]; S.token=(S.token||0)+1;
+  S.cands=c; S.errs=[]; S.codecs=null; S.token=(S.token||0)+1;
   tryPlay(0);
   if(live && S.act.type==='xtream' && item.sid) loadEpg(item);
   else if($('epgBox')) $('epgBox').innerHTML='<div class="empty">'+
@@ -1027,7 +1027,15 @@ function tryPlay(i){
       });
       S.ts.attachMediaElement(v);
       S.ts.on(mpegts.Events.ERROR,(t,d,info)=>{ if(tk!==S.token) return; note(i,'TS '+t+' '+(d||'')+(info&&info.code?' ('+info.code+')':'')); tryPlay(i+1) });
-      S.ts.on(mpegts.Events.MEDIA_INFO,()=>iniciar(v));
+      S.ts.on(mpegts.Events.MEDIA_INFO,(mi)=>{
+        const vc=(mi&&mi.videoCodec||'').toLowerCase(), ac=(mi&&mi.audioCodec||'').toLowerCase();
+        S.codecs = (mi&&(mi.videoCodec||'?'))+' / '+(mi&&(mi.audioCodec||'?'));
+        console.log('[Cine] codec do canal:', S.codecs);
+        const videoRuim = vc && !/avc|h264|264/.test(vc);
+        const audioRuim = ac && !/aac|mp3|mp4a/.test(ac);
+        if(videoRuim || audioRuim){ return codecIncompativel(mi) }
+        iniciar(v);
+      });
       S.ts.load();
       try{ S.ts.play() }catch(e){}
       setTimeout(()=>{ if(tk!==S.token) return; if(v.readyState<2 && S.ts){ note(i,'TS sem dados em 14s'); tryPlay(i+1) } }, 14000);
@@ -1057,11 +1065,20 @@ function note(i,msg){
   console.warn('[Cine]', c[0], c[1], msg);
 }
 function diagHTML(){
-  return (S.errs||[]).map(e=>
+  const cab = S.codecs ? '<div style="text-align:left;padding:8px 0;font-size:.75rem;color:var(--muted)">Codec detectado: <b style="color:var(--cyan)">'+esc(S.codecs)+'</b></div>' : '';
+  return cab + (S.errs||[]).map(e=>
     '<div style="text-align:left;border-top:1px solid var(--line);padding:8px 0">'
     +'<b style="color:var(--cyan);font-size:.72rem;letter-spacing:.1em">'+e.eng.toUpperCase()+'</b>'
     +'<div style="font-size:.74rem;color:var(--muted);word-break:break-all">'+esc(e.url)+'</div>'
     +'<div style="font-size:.74rem;color:#FFB3BC">'+esc(e.msg)+'</div></div>').join('');
+}
+function codecIncompativel(mi){
+  const vc=mi&&mi.videoCodec||'?', ac=mi&&mi.audioCodec||'?';
+  const qual = /hevc|h265|265/i.test(vc) ? 'HEVC (H.265)' : vc;
+  vstate('<b>Formato não suportado pelo navegador</b>'
+    +'<p>Este canal transmite em <b style="color:var(--cyan)">'+esc(qual)+'</b> com áudio <b style="color:var(--cyan)">'+esc(ac)+'</b>. '
+    +'Aplicativos de TV decodificam esses formatos, navegadores não. '
+    +'Procure a versão H.264 do mesmo canal, geralmente marcada como HD ou H264 na lista.</p>');
 }
 function giveUp(){
   const errs=(S.errs||[]).map(e=>e.msg).join(' ');
