@@ -347,14 +347,14 @@ document.getElementById('logoTop').src = LOGO;
 /* endereco do seu servidor Cine Company */
 const API = "https://cinecompany.jeanviniciusmendes.workers.dev";
 
-const K_LISTS='cc_lists', K_FAVS='cc_favs', K_CFG='cc_cfg', K_SES='cc_ses';
+const K_LISTS='cc_lists', K_FAVS='cc_favs', K_CFG='cc_cfg';
 const S = {
   mode:'m3u', lists:[], act:null,
   live:[], vod:[], series:[],
   cats:{live:[],vod:[],series:[]},
   tab:'live', cat:'all', q:'',
   favs:{}, cfg:{proxy:'', tv:false, ui:100},
-  cur:null, hls:null, page:0, io:null, ses:null
+  cur:null, hls:null, page:0, io:null
 };
 
 const $=id=>document.getElementById(id);
@@ -452,6 +452,243 @@ function cancelarCarga(){
 /* =========================================================
    ACESSO DO CLIENTE
    ========================================================= */
+/* renova o acesso em segundo plano, sem interromper o cliente */
+/* =========================================================
+   LOGIN
+   ========================================================= */
+function setMode(m){
+  S.mode=m;
+  $('tabM3u').classList.toggle('on',m==='m3u');
+  $('tabXt').classList.toggle('on',m==='xtream');
+  $('formM3u').style.display = m==='m3u'?'block':'none';
+  $('formXt').style.display  = m==='xtream'?'block':'none';
+}
+function loginErr(msg){const e=$('loginErr');e.textContent=msg;e.classList.toggle('show',!!msg)}
+
+function connect(){
+  loginErr('');
+  let cfg;
+  if(S.mode==='m3u'){
+    const url=$('m3uUrl').value.trim();
+    if(!/^https?:\/\//i.test(url)) return loginErr('Informe a URL completa da lista, começando com http:// ou https://');
+    cfg={id:Date.now()+'', type:'m3u', name:$('m3uName').value.trim()||'Minha lista', url};
+  }else{
+    let host=$('xtHost').value.trim().replace(/\/$/,'');
+    const user=$('xtUser').value.trim(), pass=$('xtPass').value.trim();
+    if(!host||!user||!pass) return loginErr('Preencha servidor, usuário e senha.');
+    if(!/^https?:\/\//i.test(host)) host='http://'+host;
+    cfg={id:Date.now()+'', type:'xtream', name:$('xtName').value.trim()||'Minha lista', host, user, pass};
+  }
+  S.lists.push(cfg); save(K_LISTS,S.lists);
+  openList(cfg);
+}
+
+function drawSaved(){
+  const w=$('savedWrap'), l=$('savedList');
+  if(!S.lists.length){w.style.display='none';return}
+  w.style.display='block';
+  l.innerHTML=S.lists.map(x=>`
+    <div class="saved-item" onclick="openList(S.lists.find(z=>z.id==='${x.id}'))">
+      <span class="pill">${x.type==='m3u'?'M3U':'XTREAM'}</span>
+      <div class="nm"><b>${esc(x.name)}</b><span>${esc(x.type==='m3u'?x.url:x.host)}</span></div>
+      <button class="del" onclick="event.stopPropagation();dropList('${x.id}')">✕</button>
+    </div>`).join('');
+}
+function dropList(id){
+  S.lists=S.lists.filter(x=>x.id!==id); save(K_LISTS,S.lists); drawSaved();
+}
+
+/* =========================================================
+   CARREGAMENTO
+   ========================================================= */
+async function openList(cfg, forcar){
+  if(!cfg) return;
+  S.act=cfg; save('cc_last',cfg.id);
+  busy(true,'Carregando '+cfg.name+'...','Listas grandes podem levar até um minuto. Não feche a página.');
+
+  if(!forcar){
+    const c=await cacheLer(cfg.id);
+    console.log('[Cine] cache:', c ? Math.round((Date.now()-c.ts)/60000)+' min de idade' : 'vazio');
+    if(c && (Date.now()-c.ts) < CACHE_HORAS*3600000){
+      S.live=c.live; S.vod=c.vod; S.series=c.series; S.cats=c.cats; S.pronto=c.pronto||{live:true,vod:true,series:true};
+      busy(false);
+      $('splash').style.display='none';
+      $('app').classList.add('show');
+      go('live');
+      return;
+    }
+  }
+
+  try{
+    if(cfg.type==='xtream') await loadXtream(cfg); else await loadM3U(cfg);
+    cacheSalvar(cfg.id,{ts:Date.now(), live:S.live, vod:S.vod, series:S.series, cats:S.cats, pronto:S.pronto});
+    busy(false);
+    $('splash').style.display='none';
+    $('app').classList.add('show');
+    go('live');
+  }catch(e){
+    busy(false);
+    $('splash').style.display='flex';
+    loginErr(diagnose(e));
+  }
+}
+function diagnose(e){
+  const m=String((e&&(e.message||e.name))||e)+(e&&e.cause?' / '+e.cause:'');
+  console.error('[Cine] falha ao carregar:', e);
+  window.__ultimoErro = m;
+  const mb = S.ultBytes ? ' Chegaram '+(S.ultBytes/1048576).toFixed(1)+' MB antes de parar.' : '';
+  if(/abort|tempo/i.test(m))
+    return 'A conexão com o provedor foi interrompida.'+mb+' Detalhe técnico: '+m;
+  if(/Failed to fetch|NetworkError|Load failed/i.test(m))
+    return 'Não foi possível acessar o servidor. Isso quase sempre é bloqueio de CORS do provedor: configure a URL do proxy em Ajustes, ou confirme se o servidor está no ar.';
+  if(/401|403/.test(m)) return 'Usuário ou senha recusados pelo provedor.';
+  if(/404/.test(m)) return 'O servidor respondeu 404. Copie a URL inteira que o provedor mandou, com usuário, senha, a porta (ex.: :80 ou :8080) e o final &type=m3u_plus&output=ts.';
+  return 'Falha ao carregar a lista. Detalhe técnico: '+m;
+}
+
+/* ---------- XTREAM ---------- */
+function xtUrl(c,action,extra){
+  return `${c.host}/player_api.php?username=${encodeURIComponent(c.user)}&password=${encodeURIComponent(c.pass)}`
+    + (action?`&action=${action}`:'') + (extra||'');
+}
+async function loadXtream(c){
+  const info = await grab(xtUrl(c,''),'json');
+  if(!info || !info.user_info || info.user_info.auth===0) throw new Error('401');
+  if(info.user_info.status && /expired|banned|disabled/i.test(info.user_info.status))
+    throw new Error('Conta '+info.user_info.status+' no provedor.');
+  c.exp = info.user_info.exp_date ? new Date(info.user_info.exp_date*1000) : null;
+  c.maxCons = info.user_info.max_connections;
+  c.activeCons = info.user_info.active_cons;
+
+  const [lc,ls] = await Promise.all([
+    grab(xtUrl(c,'get_live_categories'),'json').catch(()=>[]),
+    grab(xtUrl(c,'get_live_streams'),'json').catch(()=>[])
+  ]);
+  const cmap = a => Object.fromEntries((a||[]).map(x=>[x.category_id, x.category_name]));
+  const lm=cmap(lc);
+
+  S.live = (ls||[]).map(x=>({
+    id:'l'+x.stream_id, sid:x.stream_id, name:x.name, logo:x.stream_icon,
+    num:x.num, cat:lm[x.category_id]||'Sem categoria', epgId:x.epg_channel_id,
+    url:`${c.host}/live/${c.user}/${c.pass}/${x.stream_id}.m3u8`
+  }));
+  S.vod=[]; S.series=[]; S.pronto={live:true, vod:false, series:false};
+  buildCats();
+}
+
+/* filmes e series entram so quando a aba e aberta */
+async function carregarSecao(qual){
+  const c=S.act;
+  if(!c || c.type!=='xtream') return true;
+  S.pronto = S.pronto || {live:true, vod:false, series:false};
+  if(S.pronto[qual]) return true;
+
+  busy(true, qual==='vod'?'Carregando filmes...':'Carregando séries...','Isso acontece só na primeira vez.');
+  try{
+    const cmap = a => Object.fromEntries((a||[]).map(x=>[x.category_id, x.category_name]));
+    if(qual==='vod'){
+      const [vc,vs]=await Promise.all([
+        grab(xtUrl(c,'get_vod_categories'),'json').catch(()=>[]),
+        grab(xtUrl(c,'get_vod_streams'),'json').catch(()=>[])
+      ]);
+      const vm=cmap(vc);
+      S.vod=(vs||[]).map(x=>({
+        id:'v'+x.stream_id, name:x.name, logo:x.stream_icon||x.cover,
+        cat:vm[x.category_id]||'Sem categoria', rating:x.rating, year:x.year,
+        url:`${c.host}/movie/${c.user}/${c.pass}/${x.stream_id}.${x.container_extension||'mp4'}`
+      }));
+    }else{
+      const [sc,ss]=await Promise.all([
+        grab(xtUrl(c,'get_series_categories'),'json').catch(()=>[]),
+        grab(xtUrl(c,'get_series'),'json').catch(()=>[])
+      ]);
+      const sm=cmap(sc);
+      S.series=(ss||[]).map(x=>({
+        id:'s'+x.series_id, sid:x.series_id, name:x.name, logo:x.cover,
+        cat:sm[x.category_id]||'Sem categoria', plot:x.plot, seasons:null
+      }));
+    }
+    S.pronto[qual]=true;
+    buildCats();
+    cacheSalvar(c.id,{ts:Date.now(), live:S.live, vod:S.vod, series:S.series, cats:S.cats, pronto:S.pronto});
+    busy(false);
+    return true;
+  }catch(e){
+    busy(false); toast('Não foi possível carregar: '+diagnose(e).slice(0,70));
+    return false;
+  }
+}
+async function seriesInfo(item){
+  if(item.seasons) return item.seasons;
+  const c=S.act;
+  const d = await grab(xtUrl(c,'get_series_info','&series_id='+item.sid),'json');
+  const out={};
+  Object.keys(d.episodes||{}).forEach(sn=>{
+    out[sn]=(d.episodes[sn]||[]).map(e=>({
+      ep:e.episode_num, name:e.title||('Episódio '+e.episode_num),
+      url:`${c.host}/series/${c.user}/${c.pass}/${e.id}.${e.container_extension||'mp4'}`
+    }));
+  });
+  item.seasons=out; return out;
+}
+
+/* ---------- M3U ---------- */
+const RX_SER = [/^(.*?)[\s\-_.]*[SsTt](\d{1,2})[\s\-_.]*[EeXx](\d{1,3})/, /^(.*?)[\s\-_.]+(\d{1,2})[xX](\d{1,3})/];
+function attr(line,k){const m=line.match(new RegExp(k+'="([^"]*)"','i'));return m?m[1]:''}
+
+async function loadM3U(c){
+  const txt = await grabTexto(c.url);
+  if(!/#EXTM3U/i.test(txt.slice(0,600))) throw new Error('O arquivo retornado não é uma lista M3U válida.');
+  const lines = txt.split(/\r?\n/);
+  const live=[], vod=[], serEp=[];
+  let cur=null, n=0;
+  for(let i=0;i<lines.length;i++){
+    const L=lines[i].trim();
+    if(!L) continue;
+    if(/^#EXTINF/i.test(L)){
+      cur={ name:(L.split(',').slice(1).join(',')||'Sem nome').trim(),
+            logo:attr(L,'tvg-logo'), cat:attr(L,'group-title')||'Sem categoria',
+            epgId:attr(L,'tvg-id'), num:++n };
+    }else if(L[0]!=='#' && cur){
+      cur.url=L;
+      const g=cur.cat.toLowerCase(), u=L.toLowerCase();
+      const isVodExt=/\.(mp4|mkv|avi|mov|m4v)(\?|$)/.test(u);
+      let type='live';
+      if(u.includes('/series/')||/serie|season|temporada/.test(g)) type='series';
+      else if(u.includes('/movie/')||/filme|movie|vod|cinema/.test(g)||isVodExt) type='vod';
+      let m=null;
+      for(const rx of RX_SER){ m=cur.name.match(rx); if(m) break }
+      if(type==='series'||(m&&type!=='live')){
+        if(m){ serEp.push({show:m[1].replace(/[\-_.]+$/,'').trim(), season:+m[2], ep:+m[3], ...cur}) }
+        else { vod.push({id:'v'+i,...cur}) }
+      }else if(type==='vod'){ vod.push({id:'v'+i,...cur}) }
+      else { live.push({id:'l'+i,...cur}) }
+      cur=null;
+    }
+  }
+  const byShow={};
+  serEp.forEach(e=>{
+    const key=e.show.toLowerCase();
+    if(!byShow[key]) byShow[key]={id:'s'+key, name:e.show, logo:e.logo, cat:e.cat, seasons:{}};
+    const s=byShow[key];
+    if(!s.seasons[e.season]) s.seasons[e.season]=[];
+    s.seasons[e.season].push({ep:e.ep,name:e.name,url:e.url});
+  });
+  Object.values(byShow).forEach(s=>Object.values(s.seasons).forEach(a=>a.sort((x,y)=>x.ep-y.ep)));
+  S.live=live; S.vod=vod; S.series=Object.values(byShow);
+  S.pronto={live:true, vod:true, series:true};
+  buildCats();
+}
+
+function buildCats(){
+  const mk=arr=>{
+    const m={};
+    arr.forEach(x=>{m[x.cat]=(m[x.cat]||0)+1});
+    return Object.entries(m).map(([name,ct])=>({name,ct})).sort((a,b)=>a.name.localeCompare(b.name,'pt-BR'));
+  };
+  S.cats.live=mk(S.live); S.cats.vod=mk(S.vod); S.cats.series=mk(S.series);
+}
+
 /* =========================================================
    NAVEGAÇÃO
    ========================================================= */
