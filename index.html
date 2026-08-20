@@ -749,7 +749,18 @@ async function go(tab){
   document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('on', b.dataset.tab===tab));
   render();
 }
-function setCat(name){ S.cat=name; S.page=0; render() }
+function setCat(name){
+  const c=document.querySelector('.cats');
+  S.rolagemCat = c ? c.scrollLeft : 0;
+  S.cat=name; S.page=0;
+  render();
+  const novo=document.querySelector('.cats');
+  if(novo && S.rolagemCat){
+    novo.scrollLeft = S.rolagemCat;
+    const ativo = novo.querySelector('.cat.on');
+    if(ativo) ativo.scrollIntoView({block:'nearest', inline:'nearest'});
+  }
+}
 $('search').addEventListener('input', e=>{ S.q=e.target.value.trim().toLowerCase(); S.page=0; render() });
 
 function dataFor(tab){
@@ -1038,7 +1049,6 @@ function tryPlay(i){
       });
       S.ts.load();
       try{ S.ts.play() }catch(e){}
-      setTimeout(()=>{ if(tk!==S.token) return; if(v.readyState<2 && S.ts){ note(i,'TS sem dados em 14s'); tryPlay(i+1) } }, 14000);
     }catch(e){ note(i,'TS exceção: '+e.message); tryPlay(i+1) }
     return;
   }
