@@ -973,6 +973,9 @@ function play(item){
     c.push(['native',u]);
   }else if(/\.(mp4|mkv|avi|mov|m4v)(\?|$)/i.test(u)){
     c.push(['native',u]);
+    // alguns painéis servem o mesmo filme em outro contêiner
+    const semExt=u.replace(/\.(mkv|avi|mov|m4v)(\?|$)/i,'');
+    if(semExt!==u){ c.push(['native',semExt+'.mp4']); c.push(['ts',semExt]) }
   }else{
     c.push(['ts',u]);
     const h=altHls(u); if(h) c.push(['hls',h]);
@@ -1094,6 +1097,15 @@ function codecIncompativel(mi){
 function giveUp(){
   const errs=(S.errs||[]).map(e=>e.msg).join(' ');
   const only403 = /403/.test(errs) && !/404/.test(errs);
+  const ext=((S.cur&&S.cur.url||'').match(/\.(mkv|avi|mov|m4v|mp4)(\?|$)/i)||[])[1];
+  if(ext && /mkv|avi|mov/i.test(ext)){
+    vstate('<b>Formato do arquivo não roda em navegador</b>'
+      +'<p>Este filme está em <b style="color:var(--cyan)">.'+esc(ext.toUpperCase())+'</b>. '
+      +'Navegadores só reproduzem MP4 com vídeo H.264 e áudio AAC. '
+      +'Em MKV e AVI a imagem ou o som falham mesmo quando o arquivo baixa normalmente.</p>'
+      +'<button class="btn ghost" style="max-width:200px" onclick="play(S.cur)">Tentar de novo</button>');
+    return;
+  }
   const txt = only403
     ? 'O provedor respondeu 403 em todas as tentativas. Quase sempre é limite de conexões: feche o player em outros aparelhos, aguarde um minuto e tente de novo. Se persistir só neste canal, ele está fora do ar ou não faz parte do seu plano.'
     : 'Tentei HLS, MPEG-TS e reprodução direta. O canal pode estar fora do ar, ou o vídeo está em HEVC, que só roda no Chrome e no Safari.';
