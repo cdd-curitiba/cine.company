@@ -966,9 +966,10 @@ function play(item){
   const live = item.id[0]==='l';
   const c=[];
   if(/\.m3u8(\?|$)/i.test(u)){
-    c.push(['hls',u]);
     const t=altTs(u);
+    // canais ao vivo: MPEG-TS primeiro, porque muitos painéis recusam o .m3u8
     if(live && t){ c.push(['ts',t[0]]); c.push(['ts',t[1]]) }
+    c.push(['hls',u]);
     c.push(['native',u]);
   }else if(/\.(mp4|mkv|avi|mov|m4v)(\?|$)/i.test(u)){
     c.push(['native',u]);
